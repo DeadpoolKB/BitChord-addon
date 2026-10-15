@@ -287,9 +287,6 @@ app.listen(
   }
 );
 
-// Vercel serverless export
-export default app;
-
 // For local development
 if (require.main === module) {
   app.listen(
