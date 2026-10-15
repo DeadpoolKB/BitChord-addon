@@ -5,7 +5,7 @@ import type {
   Track
 } from "./types";
 
-const QOBUZ_DL_BASE_URL = "https://qobuz-dll.vercel.app";
+const QOBUZ_DL_BASE_URL = "https://qobuz-dll.foreyou.workers.dev/";
 const LASTBABE_BASE_URL = "https://lastbabe-addon.de.deplexo.com";
 
 const BROWSER_USER_AGENT =
