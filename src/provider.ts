@@ -2380,52 +2380,9 @@ export class AuthorizedProvider
       return cached;
     }
 
-    // Try Monochrome first (priority for FLAC)
+    // Try Qobuz-DL first (best 24-bit support)
     console.log(
-      `[SEARCH] Trying Monochrome for "${query}"`
-    );
-
-    const monochromeResults =
-      await searchTracksMonochrome(
-        query
-      );
-
-    if (monochromeResults.length > 0) {
-      // Add source prefix to track IDs
-      const prefixed = monochromeResults.map(track => ({
-        ...track,
-        id: `monochrome:${track.id}`
-      }));
-
-      // Score and rank results
-      const scored: ScoredTrack[] = prefixed.map(track => ({
-        track,
-        score: scoreTrack(query, track)
-      }));
-
-      // Filter out poor matches (score < -500)
-      const filtered = scored.filter(s => s.score >= -500);
-
-      // Sort by score descending
-      filtered.sort((a, b) => b.score - a.score);
-
-      const ranked = filtered.map(s => s.track);
-
-      setCached(
-        key,
-        ranked
-      );
-
-      console.log(
-        `[SEARCH] Monochrome returned ${ranked.length} tracks for "${query}"`
-      );
-
-      return ranked;
-    }
-
-    // Fallback to Qobuz-DL
-    console.log(
-      `[SEARCH] Monochrome returned no results, trying Qobuz-DL for "${query}"`
+      `[SEARCH] Trying Qobuz-DL for "${query}"`
     );
 
     const qobuzResults =
@@ -2466,7 +2423,7 @@ export class AuthorizedProvider
       return ranked;
     }
 
-    // Fallback to arcod.xyz
+    // Fallback to arcod.xyz (alternate Qobuz with 24-bit support)
     console.log(
       `[SEARCH] Qobuz-DL returned no results, trying arcod.xyz for "${query}"`
     );
@@ -2509,9 +2466,52 @@ export class AuthorizedProvider
       return ranked;
     }
 
+    // Fallback to Monochrome
+    console.log(
+      `[SEARCH] arcod.xyz returned no results, trying Monochrome for "${query}"`
+    );
+
+    const monochromeResults =
+      await searchTracksMonochrome(
+        query
+      );
+
+    if (monochromeResults.length > 0) {
+      // Add source prefix to track IDs
+      const prefixed = monochromeResults.map(track => ({
+        ...track,
+        id: `monochrome:${track.id}`
+      }));
+
+      // Score and rank results
+      const scored: ScoredTrack[] = prefixed.map(track => ({
+        track,
+        score: scoreTrack(query, track)
+      }));
+
+      // Filter out poor matches (score < -500)
+      const filtered = scored.filter(s => s.score >= -500);
+
+      // Sort by score descending
+      filtered.sort((a, b) => b.score - a.score);
+
+      const ranked = filtered.map(s => s.track);
+
+      setCached(
+        key,
+        ranked
+      );
+
+      console.log(
+        `[SEARCH] Monochrome returned ${ranked.length} tracks for "${query}"`
+      );
+
+      return ranked;
+    }
+
     // Fallback to Deezer
     console.log(
-      `[SEARCH] Qobuz-DL returned no results, trying Deezer for "${query}"`
+      `[SEARCH] Monochrome returned no results, trying Deezer for "${query}"`
     );
 
     const deezerResults =
