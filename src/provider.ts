@@ -6,7 +6,7 @@ import type {
 } from "./types";
 
 const QOBUZ_DL_BASE_URL = "https://qobuz-dll.vercel.app";
-const ARCOD_BASE_URL = "https://arcod.xyz";
+const ARCOD_BASE_URL = "https://player.arcod.xyz";
 const LASTBABE_BASE_URL = "https://lastbabe-addon.de.deplexo.com";
 const MONOCHROME_BASE_URL = "https://tracks.monochrome.st";
 const DEEZER_BASE_URL = "https://dzr.tabs-vs-spaces.wtf";
