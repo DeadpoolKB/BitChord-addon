@@ -5,8 +5,11 @@ import type {
   Track
 } from "./types";
 
-const QOBUZ_DL_BASE_URL = "https://qobuz-dll.foreyou.workers.dev/";
+const QOBUZ_DL_BASE_URL = "https://qobuz-dll.vercel.app";
+const ARCOD_BASE_URL = "https://arcod.xyz";
 const LASTBABE_BASE_URL = "https://lastbabe-addon.de.deplexo.com";
+const MONOCHROME_BASE_URL = "https://tracks.monochrome.st";
+const DEEZER_BASE_URL = "https://dzr.tabs-vs-spaces.wtf";
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 Chrome/135.0.0.0 Mobile Safari/537.36";
@@ -966,6 +969,1048 @@ async function requestLastBabeStream(
 }
 
 /**
+ * Convert Monochrome result to Track format.
+ */
+function convertMonochromeResult(
+  value: unknown
+): Track | null {
+  if (
+    typeof value !== "object" ||
+    value === null
+  ) {
+    return null;
+  }
+
+  const obj =
+    value as Record<string, unknown>;
+
+  const id = obj.id ?? obj.trackId;
+  const title = obj.title;
+
+  if (
+    (typeof id !== "number" && typeof id !== "string") ||
+    typeof title !== "string" ||
+    !title.trim()
+  ) {
+    return null;
+  }
+
+  const trackId = String(id);
+
+  const artists: string[] = [];
+
+  if (Array.isArray(obj.artistNames)) {
+    for (const v of obj.artistNames) {
+      if (typeof v === "string") {
+        artists.push(v);
+      }
+    }
+  }
+
+  const duration =
+    typeof obj.duration === "number"
+      ? Math.round(obj.duration / 1000)
+      : undefined;
+
+  const artworkURL =
+    typeof obj.artwork === "string"
+      ? obj.artwork
+      : undefined;
+
+  // Store metadata in cache for stream logs
+  trackMetadataCache.set(trackId, {
+    title: title.trim(),
+    artist: artists[0],
+    album: undefined
+  });
+
+  // Save duration for bitrate calculation
+  if (
+    duration &&
+    duration > 0
+  ) {
+    trackDurationCache.set(trackId, duration);
+  }
+
+  return {
+    id: trackId,
+    title: title.trim(),
+    artist: artists.length > 0 ? artists.join(", ") : undefined,
+    album: undefined,
+    duration,
+    artworkURL,
+    format: "flac",
+    audioQuality: "LOSSLESS"
+  };
+}
+
+/**
+ * Search Monochrome for tracks with retry logic.
+ */
+async function searchTracksMonochrome(
+  term: string
+): Promise<Track[]> {
+  const url = new URL(
+    `${MONOCHROME_BASE_URL}/search/tracks`
+  );
+
+  url.searchParams.set("q", term);
+  url.searchParams.set("limit", "10");
+
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        url.toString(),
+        {
+          headers: {
+            Accept: "application/json",
+            "User-Agent": BROWSER_USER_AGENT
+          },
+          signal: controller.signal
+        }
+      );
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
+          console.error(
+            `[MONOCHROME] Search HTTP ${response.status} ${response.statusText}`
+          );
+          return [];
+        }
+
+        console.log(
+          `[MONOCHROME] Search HTTP ${response.status}, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+        );
+        lastError = new Error(`HTTP ${response.status}`);
+        await delay(200 * Math.pow(2, attempt));
+        continue;
+      }
+
+      const payload = await response.text();
+
+      if (!payload) {
+        console.error(
+          "[MONOCHROME] Empty search response"
+        );
+        return [];
+      }
+
+      if (payload.trim().startsWith("<")) {
+        console.error(
+          "[MONOCHROME] Search returned HTML:",
+          payload.substring(0, 500)
+        );
+        return [];
+      }
+
+      const data = JSON.parse(payload);
+
+      const tracks = data.tracks;
+
+      if (!Array.isArray(tracks)) {
+        return [];
+      }
+
+      const converted: Track[] = [];
+
+      for (const item of tracks) {
+        const track = convertMonochromeResult(item);
+
+        if (track) {
+          converted.push(track);
+        }
+      }
+
+      return converted;
+    } catch (error) {
+      clearTimeout(timeout);
+
+      if (attempt >= MAX_RETRIES) {
+        console.error(
+          "[MONOCHROME] Search request failed:",
+          error
+        );
+        return [];
+      }
+
+      console.log(
+        `[MONOCHROME] Search request failed, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+      );
+      lastError = error;
+      await delay(200 * Math.pow(2, attempt));
+    }
+  }
+
+  console.error(
+    "[MONOCHROME] Search failed after retries:",
+    lastError
+  );
+
+  return [];
+}
+
+/**
+ * Request stream from Monochrome.
+ */
+async function requestMonochromeStream(
+  trackId: string,
+  _quality: Quality,
+  _atmos: string,
+  durationSeconds?: number
+): Promise<Stream | null> {
+  // Validate track ID format
+  if (!/^[A-Za-z0-9_-]+$/.test(trackId)) {
+    console.error(
+      "[MONOCHROME] Invalid track ID format"
+    );
+    return null;
+  }
+
+  const streamUrl = `${MONOCHROME_BASE_URL}/track/${encodeURIComponent(trackId)}`;
+
+  const bitrateKbps =
+    durationSeconds
+      ? await getRemoteBitrate(
+          streamUrl,
+          durationSeconds
+        )
+      : undefined;
+
+  const bitrate =
+    bitrateKbps !== undefined
+      ? bitrateKbps * 1000
+      : undefined;
+
+  return {
+    url: streamUrl,
+    format: "flac",
+    quality: "LOSSLESS",
+    codec: "flac",
+    container: "flac",
+    manifest: "none",
+    encrypted: false,
+    bitrate
+  };
+}
+
+/**
+ * Convert Deezer result to Track format.
+ */
+function convertDeezerResult(
+  value: unknown
+): Track | null {
+  if (
+    typeof value !== "object" ||
+    value === null
+  ) {
+    return null;
+  }
+
+  const obj =
+    value as Record<string, unknown>;
+
+  const id = obj.id;
+  const title = obj.title;
+
+  if (
+    (typeof id !== "number" && typeof id !== "string") ||
+    typeof title !== "string" ||
+    !title.trim()
+  ) {
+    return null;
+  }
+
+  const trackId = String(id);
+
+  let artist: string | undefined;
+
+  if (typeof obj.artist === "string") {
+    artist = obj.artist;
+  } else if (
+    typeof obj.artist === "object" &&
+    obj.artist !== null &&
+    typeof (
+      obj.artist as Record<string, unknown>
+    ).name === "string"
+  ) {
+    artist = String(
+      (
+        obj.artist as Record<string, unknown>
+      ).name
+    );
+  }
+
+  let album: string | undefined;
+
+  if (typeof obj.album === "string") {
+    album = obj.album;
+  } else if (
+    typeof obj.album === "object" &&
+    obj.album !== null &&
+    typeof (
+      obj.album as Record<string, unknown>
+    ).title === "string"
+  ) {
+    album = String(
+      (
+        obj.album as Record<string, unknown>
+      ).title
+    );
+  }
+
+  const duration =
+    typeof obj.duration === "number"
+      ? obj.duration
+      : undefined;
+
+  const artworkURL =
+    typeof obj.artworkURL === "string"
+      ? obj.artworkURL
+      : typeof obj.artwork === "string"
+        ? obj.artwork
+        : undefined;
+
+  // Store metadata in cache for stream logs
+  trackMetadataCache.set(trackId, {
+    title: title.trim(),
+    artist,
+    album
+  });
+
+  // Save duration for bitrate calculation
+  if (
+    duration &&
+    duration > 0
+  ) {
+    trackDurationCache.set(trackId, duration);
+  }
+
+  return {
+    id: trackId,
+    title: title.trim(),
+    artist,
+    album,
+    duration,
+    artworkURL,
+    format: undefined,
+    audioQuality: undefined
+  };
+}
+
+/**
+ * Convert arcod.xyz result to Track format.
+ */
+function convertArcodResult(
+  value: unknown
+): Track | null {
+  if (
+    typeof value !== "object" ||
+    value === null
+  ) {
+    return null;
+  }
+
+  const obj =
+    value as Record<string, unknown>;
+
+  const id = obj.id;
+  const title = obj.title;
+
+  if (
+    (typeof id !== "number" && typeof id !== "string") ||
+    typeof title !== "string" ||
+    !title.trim()
+  ) {
+    return null;
+  }
+
+  const trackId = String(id);
+
+  let artist: string | undefined;
+
+  if (
+    typeof obj.performer === "object" &&
+    obj.performer !== null &&
+    typeof (
+      obj.performer as Record<string, unknown>
+    ).name === "string"
+  ) {
+    artist = String(
+      (
+        obj.performer as Record<string, unknown>
+      ).name
+    );
+  }
+
+  let album: string | undefined;
+
+  if (
+    typeof obj.album === "object" &&
+    obj.album !== null &&
+    typeof (
+      obj.album as Record<string, unknown>
+    ).title === "string"
+  ) {
+    album = String(
+      (
+        obj.album as Record<string, unknown>
+      ).title
+    );
+  }
+
+  const duration =
+    typeof obj.duration === "number"
+      ? obj.duration
+      : undefined;
+
+  let artworkURL: string | undefined;
+
+  if (
+    typeof obj.album === "object" &&
+    obj.album !== null
+  ) {
+    const albumObj = obj.album as Record<string, unknown>;
+
+    if (
+      typeof albumObj.image === "object" &&
+      albumObj.image !== null &&
+      typeof (
+        albumObj.image as Record<string, unknown>
+      ).large === "string"
+    ) {
+      artworkURL = String(
+        (
+          albumObj.image as Record<string, unknown>
+        ).large
+      );
+    }
+  }
+
+  const maxBitDepth =
+    typeof obj.maximum_bit_depth === "number"
+      ? obj.maximum_bit_depth
+      : undefined;
+
+  const format = maxBitDepth ? "flac" : undefined;
+  const audioQuality = maxBitDepth ? "LOSSLESS" : undefined;
+
+  // Store metadata in cache for stream logs
+  trackMetadataCache.set(trackId, {
+    title: title.trim(),
+    artist,
+    album
+  });
+
+  // Save duration for bitrate calculation
+  if (
+    duration &&
+    duration > 0
+  ) {
+    trackDurationCache.set(trackId, duration);
+  }
+
+  return {
+    id: trackId,
+    title: title.trim(),
+    artist,
+    album,
+    duration,
+    artworkURL,
+    format,
+    audioQuality
+  };
+}
+
+/**
+ * Search arcod.xyz for tracks with retry logic.
+ */
+async function searchTracksArcod(
+  term: string
+): Promise<Track[]> {
+  const url = new URL(
+    `${ARCOD_BASE_URL}/api/search`
+  );
+
+  url.searchParams.set("q", term);
+
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        url.toString(),
+        {
+          headers: {
+            Accept: "application/json",
+            "User-Agent": BROWSER_USER_AGENT
+          },
+          signal: controller.signal
+        }
+      );
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
+          console.error(
+            `[ARCOD] Search HTTP ${response.status} ${response.statusText}`
+          );
+          return [];
+        }
+
+        console.log(
+          `[ARCOD] Search HTTP ${response.status}, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+        );
+        lastError = new Error(`HTTP ${response.status}`);
+        await delay(200 * Math.pow(2, attempt));
+        continue;
+      }
+
+      const payload = await response.text();
+
+      if (!payload) {
+        console.error(
+          "[ARCOD] Empty search response"
+        );
+        return [];
+      }
+
+      if (payload.trim().startsWith("<")) {
+        console.error(
+          "[ARCOD] Search returned HTML:",
+          payload.substring(0, 500)
+        );
+        return [];
+      }
+
+      const data = JSON.parse(payload);
+
+      if (!data.success) {
+        if (attempt >= MAX_RETRIES) {
+          console.error(
+            `[ARCOD] Search rejected: ${data.error ?? "unknown error"}`
+          );
+          return [];
+        }
+
+        console.log(
+          `[ARCOD] Search rejected, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+        );
+        lastError = new Error(data.error || "Search rejected");
+        await delay(200 * Math.pow(2, attempt));
+        continue;
+      }
+
+      const dataObj = data.data;
+
+      if (
+        !dataObj ||
+        typeof dataObj !== "object"
+      ) {
+        return [];
+      }
+
+      const tracks = dataObj.tracks;
+
+      if (
+        !tracks ||
+        typeof tracks !== "object"
+      ) {
+        return [];
+      }
+
+      const items = (tracks as Record<string, unknown>).items;
+
+      if (!Array.isArray(items)) {
+        return [];
+      }
+
+      const converted: Track[] = [];
+
+      for (const item of items) {
+        const track = convertArcodResult(item);
+
+        if (track) {
+          converted.push(track);
+        }
+      }
+
+      return converted;
+    } catch (error) {
+      clearTimeout(timeout);
+
+      if (attempt >= MAX_RETRIES) {
+        console.error(
+          "[ARCOD] Search request failed:",
+          error
+        );
+        return [];
+      }
+
+      console.log(
+        `[ARCOD] Search request failed, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+      );
+      lastError = error;
+      await delay(200 * Math.pow(2, attempt));
+    }
+  }
+
+  console.error(
+    "[ARCOD] Search failed after retries:",
+    lastError
+  );
+
+  return [];
+}
+
+/**
+ * Request stream from arcod.xyz with retry logic.
+ */
+async function requestArcodStream(
+  trackId: string,
+  quality: Quality,
+  _atmos: string,
+  durationSeconds?: number
+): Promise<Stream | null> {
+  const qualityId = quality === "lossless" ? "27" : "5";
+
+  const url = new URL(
+    `${ARCOD_BASE_URL}/api/player/stream/${encodeURIComponent(trackId)}`
+  );
+
+  url.searchParams.set("quality", qualityId);
+
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        url.toString(),
+        {
+          headers: {
+            Accept: "application/json",
+            "User-Agent": BROWSER_USER_AGENT
+          },
+          signal: controller.signal
+        }
+      );
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
+          console.error(
+            `[ARCOD] Stream HTTP ${response.status} ${response.statusText}`
+          );
+          return null;
+        }
+
+        console.log(
+          `[ARCOD] Stream HTTP ${response.status}, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+        );
+        lastError = new Error(`HTTP ${response.status}`);
+        await delay(200 * Math.pow(2, attempt));
+        continue;
+      }
+
+      const payload = await response.text();
+
+      if (!payload) {
+        console.error(
+          "[ARCOD] Empty stream response"
+        );
+        return null;
+      }
+
+      if (payload.trim().startsWith("<")) {
+        console.error(
+          "[ARCOD] Stream returned HTML:",
+          payload.substring(0, 500)
+        );
+        return null;
+      }
+
+      const data = JSON.parse(payload);
+
+      if (!data.success) {
+        if (attempt >= MAX_RETRIES) {
+          console.error(
+            `[ARCOD] Stream rejected: ${data.error ?? "unknown error"}`
+          );
+          return null;
+        }
+
+        console.log(
+          `[ARCOD] Stream rejected, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+        );
+        lastError = new Error(data.error || "Stream rejected");
+        await delay(200 * Math.pow(2, attempt));
+        continue;
+      }
+
+      const streamUrl = data.url;
+
+      if (
+        typeof streamUrl !== "string" ||
+        !/^https:\/\//i.test(streamUrl)
+      ) {
+        console.error(
+          "[ARCOD] Invalid or missing stream URL"
+        );
+        return null;
+      }
+
+      const mimeType = data.mimeType;
+      const format =
+        typeof mimeType === "string"
+          ? mimeType.split("/").pop()
+          : undefined;
+
+      const bitrateKbps =
+        durationSeconds
+          ? await getRemoteBitrate(
+              streamUrl,
+              durationSeconds
+            )
+          : undefined;
+
+      const bitrate =
+        bitrateKbps !== undefined
+          ? bitrateKbps * 1000
+          : undefined;
+
+      return {
+        url: streamUrl,
+        format,
+        quality:
+          typeof data.quality === "number"
+            ? String(data.quality)
+            : quality,
+        manifest: "none",
+        encrypted: false,
+        bitrate
+      };
+    } catch (error) {
+      clearTimeout(timeout);
+
+      if (attempt >= MAX_RETRIES) {
+        console.error(
+          "[ARCOD] Stream request failed:",
+          error
+        );
+        return null;
+      }
+
+      console.log(
+        `[ARCOD] Stream request failed, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+      );
+      lastError = error;
+      await delay(200 * Math.pow(2, attempt));
+    }
+  }
+
+  console.error(
+    "[ARCOD] Stream failed after retries:",
+    lastError
+  );
+
+  return null;
+}
+
+/**
+ * Search Deezer for tracks with retry logic.
+ */
+async function searchTracksDeezer(
+  term: string,
+  quality: Quality,
+  atmos: string
+): Promise<Track[]> {
+  const url = new URL(
+    `${DEEZER_BASE_URL}/search`
+  );
+
+  url.searchParams.set("q", term);
+  url.searchParams.set("quality", quality);
+  url.searchParams.set("atmos", atmos);
+
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        url.toString(),
+        {
+          headers: {
+            Accept: "application/json",
+            "User-Agent": BROWSER_USER_AGENT
+          },
+          signal: controller.signal
+        }
+      );
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
+          console.error(
+            `[DEEZER] Search HTTP ${response.status} ${response.statusText}`
+          );
+          return [];
+        }
+
+        console.log(
+          `[DEEZER] Search HTTP ${response.status}, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+        );
+        lastError = new Error(`HTTP ${response.status}`);
+        await delay(200 * Math.pow(2, attempt));
+        continue;
+      }
+
+      const payload = await response.text();
+
+      if (!payload) {
+        console.error(
+          "[DEEZER] Empty search response"
+        );
+        return [];
+      }
+
+      if (payload.trim().startsWith("<")) {
+        console.error(
+          "[DEEZER] Search returned HTML:",
+          payload.substring(0, 500)
+        );
+        return [];
+      }
+
+      const data = JSON.parse(payload);
+
+      const tracks = data.tracks ?? (Array.isArray(data) ? data : []);
+
+      if (!Array.isArray(tracks)) {
+        return [];
+      }
+
+      const converted: Track[] = [];
+
+      for (const item of tracks) {
+        const track = convertDeezerResult(item);
+
+        if (track) {
+          converted.push(track);
+        }
+      }
+
+      return converted;
+    } catch (error) {
+      clearTimeout(timeout);
+
+      if (attempt >= MAX_RETRIES) {
+        console.error(
+          "[DEEZER] Search request failed:",
+          error
+        );
+        return [];
+      }
+
+      console.log(
+        `[DEEZER] Search request failed, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+      );
+      lastError = error;
+      await delay(200 * Math.pow(2, attempt));
+    }
+  }
+
+  console.error(
+    "[DEEZER] Search failed after retries:",
+    lastError
+  );
+
+  return [];
+}
+
+/**
+ * Request stream from Deezer with retry logic.
+ */
+async function requestDeezerStream(
+  trackId: string,
+  quality: Quality,
+  atmos: string,
+  durationSeconds?: number
+): Promise<Stream | null> {
+  // Validate track ID format
+  if (!/^[A-Za-z0-9_-]+$/.test(trackId)) {
+    console.error(
+      "[DEEZER] Invalid track ID format"
+    );
+    return null;
+  }
+
+  const url = new URL(
+    `${DEEZER_BASE_URL}/stream/${encodeURIComponent(trackId)}`
+  );
+
+  url.searchParams.set("quality", quality);
+  url.searchParams.set("atmos", atmos);
+
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        url.toString(),
+        {
+          headers: {
+            Accept: "application/json",
+            "User-Agent": BROWSER_USER_AGENT
+          },
+          signal: controller.signal
+        }
+      );
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
+          console.error(
+            `[DEEZER] Stream HTTP ${response.status} ${response.statusText}`
+          );
+          return null;
+        }
+
+        console.log(
+          `[DEEZER] Stream HTTP ${response.status}, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+        );
+        lastError = new Error(`HTTP ${response.status}`);
+        await delay(200 * Math.pow(2, attempt));
+        continue;
+      }
+
+      const payload = await response.text();
+
+      if (!payload) {
+        console.error(
+          "[DEEZER] Empty stream response"
+        );
+        return null;
+      }
+
+      if (payload.trim().startsWith("<")) {
+        console.error(
+          "[DEEZER] Stream returned HTML:",
+          payload.substring(0, 500)
+        );
+        return null;
+      }
+
+      const data = JSON.parse(payload);
+
+      const streamUrl = data.url;
+
+      if (
+        typeof streamUrl !== "string" ||
+        !/^https:\/\//i.test(streamUrl)
+      ) {
+        console.error(
+          "[DEEZER] Invalid or missing stream URL"
+        );
+        return null;
+      }
+
+      const bitrateKbps =
+        durationSeconds
+          ? await getRemoteBitrate(
+              streamUrl,
+              durationSeconds
+            )
+          : undefined;
+
+      const bitrate =
+        bitrateKbps !== undefined
+          ? bitrateKbps * 1000
+          : undefined;
+
+      return {
+        url: streamUrl,
+        format:
+          typeof data.format === "string"
+            ? data.format
+            : undefined,
+        quality:
+          typeof data.quality === "string"
+            ? data.quality
+            : quality,
+        codec:
+          typeof data.codec === "string"
+            ? data.codec
+            : undefined,
+        container:
+          typeof data.container === "string"
+            ? data.container
+            : undefined,
+        manifest:
+          data.manifest === "hls" ||
+          data.manifest === "dash"
+            ? data.manifest
+            : "none",
+        encrypted: data.encrypted === true,
+        sampleRate:
+          typeof data.sampleRate === "number"
+            ? data.sampleRate
+            : undefined,
+        bitDepth:
+          typeof data.bitDepth === "number"
+            ? data.bitDepth
+            : undefined,
+        bitrate
+      };
+    } catch (error) {
+      clearTimeout(timeout);
+
+      if (attempt >= MAX_RETRIES) {
+        console.error(
+          "[DEEZER] Stream request failed:",
+          error
+        );
+        return null;
+      }
+
+      console.log(
+        `[DEEZER] Stream request failed, retrying (attempt ${attempt + 1}/${MAX_RETRIES + 1})`
+      );
+      lastError = error;
+      await delay(200 * Math.pow(2, attempt));
+    }
+  }
+
+  console.error(
+    "[DEEZER] Stream failed after retries:",
+    lastError
+  );
+
+  return null;
+}
+
+/**
  * Determine the average bitrate of a remote audio file
  * without downloading the entire file.
  *
@@ -1317,7 +2362,7 @@ export class AuthorizedProvider
   async search(
     query: string,
     quality: Quality,
-    _atmos: string
+    atmos: string
   ): Promise<Track[]> {
     const key =
       cacheKey(
@@ -1335,9 +2380,52 @@ export class AuthorizedProvider
       return cached;
     }
 
-    // Try Qobuz-DL first
+    // Try Monochrome first (priority for FLAC)
     console.log(
-      `[SEARCH] Trying Qobuz-DL for "${query}"`
+      `[SEARCH] Trying Monochrome for "${query}"`
+    );
+
+    const monochromeResults =
+      await searchTracksMonochrome(
+        query
+      );
+
+    if (monochromeResults.length > 0) {
+      // Add source prefix to track IDs
+      const prefixed = monochromeResults.map(track => ({
+        ...track,
+        id: `monochrome:${track.id}`
+      }));
+
+      // Score and rank results
+      const scored: ScoredTrack[] = prefixed.map(track => ({
+        track,
+        score: scoreTrack(query, track)
+      }));
+
+      // Filter out poor matches (score < -500)
+      const filtered = scored.filter(s => s.score >= -500);
+
+      // Sort by score descending
+      filtered.sort((a, b) => b.score - a.score);
+
+      const ranked = filtered.map(s => s.track);
+
+      setCached(
+        key,
+        ranked
+      );
+
+      console.log(
+        `[SEARCH] Monochrome returned ${ranked.length} tracks for "${query}"`
+      );
+
+      return ranked;
+    }
+
+    // Fallback to Qobuz-DL
+    console.log(
+      `[SEARCH] Monochrome returned no results, trying Qobuz-DL for "${query}"`
     );
 
     const qobuzResults =
@@ -1378,9 +2466,97 @@ export class AuthorizedProvider
       return ranked;
     }
 
+    // Fallback to arcod.xyz
+    console.log(
+      `[SEARCH] Qobuz-DL returned no results, trying arcod.xyz for "${query}"`
+    );
+
+    const arcodResults =
+      await searchTracksArcod(
+        query
+      );
+
+    if (arcodResults.length > 0) {
+      // Add source prefix to track IDs
+      const prefixed = arcodResults.map(track => ({
+        ...track,
+        id: `arcod:${track.id}`
+      }));
+
+      // Score and rank results
+      const scored: ScoredTrack[] = prefixed.map(track => ({
+        track,
+        score: scoreTrack(query, track)
+      }));
+
+      // Filter out poor matches (score < -500)
+      const filtered = scored.filter(s => s.score >= -500);
+
+      // Sort by score descending
+      filtered.sort((a, b) => b.score - a.score);
+
+      const ranked = filtered.map(s => s.track);
+
+      setCached(
+        key,
+        ranked
+      );
+
+      console.log(
+        `[SEARCH] arcod.xyz returned ${ranked.length} tracks for "${query}"`
+      );
+
+      return ranked;
+    }
+
+    // Fallback to Deezer
+    console.log(
+      `[SEARCH] Qobuz-DL returned no results, trying Deezer for "${query}"`
+    );
+
+    const deezerResults =
+      await searchTracksDeezer(
+        query,
+        quality,
+        atmos
+      );
+
+    if (deezerResults.length > 0) {
+      // Add source prefix to track IDs
+      const prefixed = deezerResults.map(track => ({
+        ...track,
+        id: `deezer:${track.id}`
+      }));
+
+      // Score and rank results
+      const scored: ScoredTrack[] = prefixed.map(track => ({
+        track,
+        score: scoreTrack(query, track)
+      }));
+
+      // Filter out poor matches (score < -500)
+      const filtered = scored.filter(s => s.score >= -500);
+
+      // Sort by score descending
+      filtered.sort((a, b) => b.score - a.score);
+
+      const ranked = filtered.map(s => s.track);
+
+      setCached(
+        key,
+        ranked
+      );
+
+      console.log(
+        `[SEARCH] Deezer returned ${ranked.length} tracks for "${query}"`
+      );
+
+      return ranked;
+    }
+
     // Fallback to LastBabe
     console.log(
-      `[SEARCH] Qobuz-DL returned no results, trying LastBabe for "${query}"`
+      `[SEARCH] Deezer returned no results, trying LastBabe for "${query}"`
     );
 
     const lastBabeResults =
@@ -1473,7 +2649,17 @@ export class AuthorizedProvider
     const duration =
       trackDurationCache.get(trackId);
 
-    if (source === 'qobuzdl') {
+    if (source === 'monochrome') {
+      const stream =
+        await requestMonochromeStream(
+          trackId,
+          quality,
+          _atmos,
+          duration
+        );
+
+      return stream;
+    } else if (source === 'qobuzdl') {
       const formatId =
         qualityToFormatId(
           quality
@@ -1483,6 +2669,26 @@ export class AuthorizedProvider
         await requestQobuzDLStream(
           trackId,
           formatId,
+          duration
+        );
+
+      return stream;
+    } else if (source === 'arcod') {
+      const stream =
+        await requestArcodStream(
+          trackId,
+          quality,
+          _atmos,
+          duration
+        );
+
+      return stream;
+    } else if (source === 'deezer') {
+      const stream =
+        await requestDeezerStream(
+          trackId,
+          quality,
+          _atmos,
           duration
         );
 
