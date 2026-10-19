@@ -5,8 +5,8 @@ import type {
   Track
 } from "./types";
 
-const QOBUZ_DL_BASE_URL = "https://qobuz-dll.vercel.app";
-const LASTBABE_BASE_URL = "https://lastbabe.velixir.run";
+const QOBUZ_DL_BASE_URL = "https://qobuz-dll.foreyou.workers.dev/";
+const LASTBABE_BASE_URL = "https://tracks.monochrome.st/";
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 Chrome/135.0.0.0 Mobile Safari/537.36";
