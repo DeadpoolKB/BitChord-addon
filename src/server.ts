@@ -4,44 +4,28 @@ import { TtlCache } from './cache.js';
 import { AppError, badRequest, notFound } from './errors.js';
 import { normalizeTrack, streamResponse, upstreamIdFromPublicId } from './normalize.js';
 import { createProvider, createSourceProvider, type IsolatedSource } from './providers/index.js';
-import { getTrackMetadata } from './providers/track-metadata-cache.js';
 import type { QobuzProvider, Quality, PublicTrack } from './types.js';
 
 const config = loadConfig();
-const app = Fastify({ logger: false });
-
-// Add request logging middleware
-app.addHook('onRequest', (req, reply, done) => {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.url}`);
-  done();
-});
+const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', '*.url'] } });
 
 const manifests = {
   root: { id: 'com.bitchord.qobuz', name: 'k', version: '1.0.0' },
-  qobuzdl: { id: 'com.bitchord.qobuz.qobuzdl', name: 'k-DL', version: '1.0.0' },
-  optional: { id: 'com.bitchord.qobuz.optional', name: 'k Alt', version: '1.0.0' },
-  lastbabe: { id: 'com.bitchord.qobuz.lastbabe', name: 'LastBabe', version: '1.0.0' },
-  monochrome: { id: 'com.bitchord.qobuz.monochrome', name: 'Monochrome Lossless', version: '1.0.0' },
-  deezer: { id: 'com.bitchord.qobuz.deezer', name: 'Deezer Fallback', version: '1.0.0' },
+  qobuzdl: { id: 'com.bitchord.qobuz.qobuzdl', name: 'k - Qobuz-DL', version: '1.0.0' },
+  lastbabe: { id: 'com.bitchord.qobuz.lastbabe', name: 'k - LastBabe', version: '1.0.0' },
+  monochrome: { id: 'com.bitchord.qobuz.monochrome', name: 'k - Monochrome', version: '1.0.0' },
+  deezer: { id: 'com.bitchord.qobuz.deezer', name: 'k - Deezer', version: '1.0.0' },
+  eljohnzc: { id: 'com.bitchord.qobuz.eljohnzc', name: 'k - Eljohnzc', version: '1.0.0' },
+  instable: { id: 'com.bitchord.qobuz.instable', name: 'k - Instable', version: '1.0.0' },
 } as const;
 
-registerAddon('', createProvider(config), manifests.root);
-registerAddon('/a', createSourceProvider(config, 'qobuzdl'), manifests.qobuzdl);
-registerAddon('/b', createSourceProvider(config, 'optional'), manifests.optional);
-registerAddon('/c', createSourceProvider(config, 'lastbabe'), manifests.lastbabe);
-registerAddon('/d', createSourceProvider(config, 'monochrome'), manifests.monochrome);
-registerAddon('/e', createSourceProvider(config, 'deezer'), manifests.deezer);
-
-// Health endpoint
-app.get('/health', async (_request, reply) => {
-  return reply.send({
-    status: 'ok',
-    service: 'qobuz-addon',
-    version: '1.0.0',
-    timestamp: new Date().toISOString()
-  });
-});
+registerAddon('', createProvider(config, app.log), manifests.root);
+registerAddon('/a', createSourceProvider(config, 'qobuzdl', app.log), manifests.qobuzdl);
+registerAddon('/b', createSourceProvider(config, 'lastbabe', app.log), manifests.lastbabe);
+registerAddon('/c', createSourceProvider(config, 'monochrome', app.log), manifests.monochrome);
+registerAddon('/d', createSourceProvider(config, 'deezer', app.log), manifests.deezer);
+registerAddon('/e', createSourceProvider(config, 'eljohnzc', app.log), manifests.eljohnzc);
+registerAddon('/f', createSourceProvider(config, 'instable', app.log), manifests.instable);
 
 function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: string; name: string; version: string }): void {
   const searchCache = new TtlCache<PublicTrack[]>(config.cacheTtlMs);
@@ -62,24 +46,24 @@ function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: 
     const key = `${query}\u0000${quality}\u0000${atmos}`;
     const cached = searchCache.get(key);
     if (cached) {
-      console.log(`[SEARCH] Cache hit for "${query}"`);
-      return reply.header('Cache-Control', 'public, max-age=30, s-maxage=300, stale-while-revalidate=600').send({ tracks: cached });
+      app.log.info(`[SEARCH] Cache hit for "${query}"`);
+      return reply.header('Cache-Control', 'public, max-age=300, s-maxage=600, stale-while-revalidate=900').send({ tracks: cached });
     }
     try {
+      app.log.info(`[SEARCH] Cache miss for "${query}"`);
       const tracks = (await provider.search(query, quality, atmos)).flatMap(track => {
         try { return [normalizeTrack(track, config.idSecret)]; } catch { return []; }
       });
       searchCache.set(key, tracks);
-      if (tracks.length === 0) {
-        console.log(`[SEARCH] Not found - no tracks for "${query}"`);
-      } else {
-        console.log(`[SEARCH] Success - returned ${tracks.length} tracks for "${query}"`);
-      }
-      return reply.header('Cache-Control', 'public, max-age=30, s-maxage=300, stale-while-revalidate=600').send({ tracks });
+      app.log.info(`[SEARCH] Success - returned ${tracks.length} tracks for "${query}"`);
+      return reply.header('Cache-Control', 'public, max-age=300, s-maxage=600, stale-while-revalidate=900').send({ tracks });
     } catch (error) {
-      console.error('[SEARCH] Provider error:', error);
       const stale = searchCache.getStale(key);
-      if (stale) return reply.header('Cache-Control', 'public, max-age=10, s-maxage=30, stale-while-revalidate=120').send({ tracks: stale, stale: true });
+      if (stale) {
+        app.log.warn(`[SEARCH] Error - serving stale cache for "${query}"`);
+        return reply.header('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=300').send({ tracks: stale, stale: true });
+      }
+      app.log.error({ error }, `[SEARCH] Error for "${query}"`);
       throw error;
     }
   });
@@ -91,26 +75,27 @@ function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: 
     if (!/^qobuz_[A-Za-z0-9_-]{10,120}$/.test(id)) throw notFound('track not found');
     const upstreamId = upstreamIdFromPublicId(id, config.idSecret);
     if (!upstreamId) throw notFound('track not available');
-    const stream = await provider.getStream(upstreamId, quality, atmos);
-    if (!stream) {
-      console.log(`[STREAM] Not found - no stream for track ${id}`);
-      throw notFound('track not available');
+    try {
+      const stream = await provider.getStream(upstreamId, quality, atmos);
+      if (!stream) {
+        app.log.warn(`[STREAM] Not found - no stream for track ${id}`);
+        throw notFound('track not available');
+      }
+      if (!stream.url) {
+        app.log.warn(`[STREAM] Not found - no URL for track ${id}`);
+        throw notFound('track not available');
+      }
+      app.log.info(`[STREAM] Success - returning stream for track ${id}`);
+      return reply.header('Cache-Control', 'public, max-age=60, s-maxage=120, stale-while-revalidate=300').send(streamResponse(stream, quality));
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      app.log.error({ error }, `[STREAM] Error for track ${id}`);
+      throw notFound('track has no playable rendition');
     }
-    if (!stream.url) {
-      console.log(`[STREAM] Not found - no URL for track ${id}`);
-      throw notFound('track not available');
-    }
-    // Strip source prefix (e.g., "qobuzdl:") for metadata lookup
-    const metadataId = upstreamId.includes(':') ? upstreamId.split(':')[1] : upstreamId;
-    const metadata = getTrackMetadata(metadataId);
-    const songName = metadata?.title || 'Unknown Track';
-    console.log(`[STREAM] Success - returning stream for "${songName}" (track ${id})`);
-    try { return reply.send(streamResponse(stream, quality)); } catch { throw notFound('track has no playable rendition'); }
   });
 }
 
 app.setErrorHandler((error, _request, reply) => {
-  console.error('[ERROR] Unhandled server error:', error);
   if (error instanceof AppError) return reply.code(error.statusCode).send({ error: error.message });
   const candidate = error as { statusCode?: unknown; status?: unknown };
   const status = typeof candidate.statusCode === 'number' ? candidate.statusCode : typeof candidate.status === 'number' ? candidate.status : 500;
@@ -125,20 +110,8 @@ function parseQuality(value?: string): Quality {
 
 if (process.env.VERCEL !== '1') {
   app.listen({ host: config.host, port: config.port }).then(() => {
-    console.log('');
-    console.log('========================================');
-    console.log('       BitChord k Addon');
-    console.log('========================================');
-    console.log(`Port: ${config.port}`);
-    console.log(`Manifest: http://localhost:${config.port}/manifest.json`);
-    console.log(`Search:   http://localhost:${config.port}/search?q=test`);
-    console.log(`Health:   http://localhost:${config.port}/health`);
-    console.log('========================================');
-    console.log('');
-  }).catch(error => {
-    console.error('[ERROR] Failed to start server:', error);
-    process.exit(1);
-  });
+    app.log.info({ host: config.host, port: config.port, provider: config.provider }, 'BitChord addon listening');
+  }).catch(error => { app.log.error(error); process.exit(1); });
 }
 
 export { app, parseQuality };
