@@ -1,7 +1,7 @@
 import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
-import { getRemoteBitrate } from '../bitrate.js';
+import { getRemoteBitrate, estimateBitrate } from '../bitrate.js';
 
 type RecordValue = Record<string, unknown>;
 
@@ -37,9 +37,17 @@ export class MonochromeProvider implements QobuzProvider {
     // Calculate bitrate if we have duration
     let bitrate: number | undefined;
     if (duration && duration > 0) {
-      const bitrateKbps = await getRemoteBitrate(streamUrl, duration);
+      const bitrateKbps = await getRemoteBitrate(streamUrl, duration, this.logger);
       if (bitrateKbps !== undefined) {
         bitrate = bitrateKbps * 1000; // Convert to bits per second
+      }
+    }
+
+    // Fallback to estimated bitrate if remote calculation failed
+    if (!bitrate) {
+      bitrate = estimateBitrate(undefined, undefined, _quality);
+      if (bitrate) {
+        this.logger?.info(`[MONOCHROME] Using estimated bitrate: ${Math.round(bitrate / 1000)} kbps`);
       }
     }
 

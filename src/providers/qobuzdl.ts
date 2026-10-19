@@ -1,7 +1,7 @@
 import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
-import { getRemoteBitrate } from '../bitrate.js';
+import { getRemoteBitrate, estimateBitrate } from '../bitrate.js';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -43,7 +43,7 @@ export class QobuzDlProvider implements QobuzProvider {
     // Calculate bitrate if we have duration
     let bitrate: number | undefined;
     if (duration && duration > 0) {
-      const bitrateKbps = await getRemoteBitrate(url, duration);
+      const bitrateKbps = await getRemoteBitrate(url, duration, this.logger);
       if (bitrateKbps !== undefined) {
         bitrate = bitrateKbps * 1000; // Convert to bits per second
       }
@@ -53,6 +53,14 @@ export class QobuzDlProvider implements QobuzProvider {
     const bitDepth = data && typeof data.bit_depth === 'number' ? data.bit_depth : undefined;
     const samplingRate = data && typeof data.sampling_rate === 'number' ? data.sampling_rate : undefined;
     const sampleRate = samplingRate ? Math.round(samplingRate * 1000) : undefined;
+
+    // Fallback to estimated bitrate if remote calculation failed
+    if (!bitrate) {
+      bitrate = estimateBitrate(sampleRate, bitDepth, quality);
+      if (bitrate) {
+        this.logger?.info(`[QOBUZ-DL] Using estimated bitrate: ${Math.round(bitrate / 1000)} kbps`);
+      }
+    }
 
     this.logger?.info(`[QOBUZ-DL] Stream success for track ${trackId}${bitrate ? ` (bitrate: ${Math.round(bitrate / 1000)} kbps)` : ''}`);
 
