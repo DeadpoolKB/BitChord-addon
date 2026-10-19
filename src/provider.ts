@@ -5,7 +5,7 @@ import type {
   Track
 } from "./types";
 
-const QOBUZ_DL_BASE_URL = "https://qobuz-dll.forey";
+const QOBUZ_DL_BASE_URL = "https://qobuz-dll.foreyou.workers.dev";
 const Monochrome_BASE_URL = "https://tracks.monochrome.st/";
 
 const BROWSER_USER_AGENT =
