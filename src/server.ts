@@ -1,322 +1,92 @@
-import express, { Request, Response, NextFunction } from "express";
-import { AuthorizedProvider } from "./provider";
-import { Quality } from "./types";
+import Fastify from 'fastify';
+import { loadConfig, type Config } from './config.js';
+import { TtlCache } from './cache.js';
+import { AppError, badRequest, notFound } from './errors.js';
+import { normalizeTrack, streamResponse, upstreamIdFromPublicId } from './normalize.js';
+import { createProvider, createSourceProvider, type IsolatedSource } from './providers/index.js';
+import type { QobuzProvider, Quality, PublicTrack } from './types.js';
 
-const app = express();
-const provider = new AuthorizedProvider();
+const config = loadConfig();
+const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', '*.url'] } });
 
-const PORT = Number(process.env.PORT || 4000);
+const manifests = {
+  root: { id: 'com.bitchord.qobuz', name: 'Qobuz', version: '1.0.0' },
+  qobuzdl: { id: 'com.bitchord.qobuz.qobuzdl', name: 'Qobuz-DL', version: '1.0.0' },
+  optional: { id: 'com.bitchord.qobuz.optional', name: 'Qobuz Alt', version: '1.0.0' },
+  lastbabe: { id: 'com.bitchord.qobuz.lastbabe', name: 'LastBabe', version: '1.0.0' },
+  monochrome: { id: 'com.bitchord.qobuz.monochrome', name: 'Monochrome Lossless', version: '1.0.0' },
+  deezer: { id: 'com.bitchord.qobuz.deezer', name: 'Deezer Fallback', version: '1.0.0' },
+} as const;
 
-app.disable("x-powered-by");
-app.use(express.json());
+registerAddon('', createProvider(config), manifests.root);
+registerAddon('/a', createSourceProvider(config, 'qobuzdl'), manifests.qobuzdl);
+registerAddon('/b', createSourceProvider(config, 'optional'), manifests.optional);
+registerAddon('/c', createSourceProvider(config, 'lastbabe'), manifests.lastbabe);
+registerAddon('/d', createSourceProvider(config, 'monochrome'), manifests.monochrome);
+registerAddon('/e', createSourceProvider(config, 'deezer'), manifests.deezer);
 
-const MANIFEST = {
-  id: "kaleb.bitchord.music",
-  name: "Qobuz HiFi",
-  version: "1.0.0",
-  resources: [
-    "search",
-    "stream"
-  ],
-  allowDownloads: 0,
-  settings: [
-    {
-      key: "quality",
-      type: "select",
-      default: "lossless",
-      options: [
-        { label: "Lossless", value: "lossless" },
-        { label: "High", value: "high" },
-        { label: "Low", value: "low" }
-      ]
+function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: string; name: string; version: string }): void {
+  const searchCache = new TtlCache<PublicTrack[]>(config.cacheTtlMs);
+  const route = (path: string): string => `${prefix}${path}` || '/';
+
+  app.get(route('/manifest.json'), async (_request, reply) => reply.header('Cache-Control', 'public, max-age=3600, s-maxage=86400').send({
+    ...manifest, resources: ['search', 'stream'], allowDownloads: 0,
+    settings: [{ key: 'quality', type: 'select', default: 'lossless', options: [
+      { label: 'Lossless', value: 'lossless' }, { label: 'High', value: 'high' }, { label: 'Low', value: 'low' },
+    ] }],
+  }));
+
+  app.get<{ Querystring: { q?: string; quality?: string; atmos?: string } }>(route('/search'), async (request, reply) => {
+    const query = request.query.q?.trim();
+    if (!query) throw badRequest('q is required');
+    const quality = parseQuality(request.query.quality);
+    const atmos = request.query.atmos ?? 'auto';
+    const key = `${query}\u0000${quality}\u0000${atmos}`;
+    const cached = searchCache.get(key);
+    if (cached) return reply.header('Cache-Control', 'public, max-age=30, s-maxage=300, stale-while-revalidate=600').send({ tracks: cached });
+    try {
+      const tracks = (await provider.search(query, quality, atmos)).flatMap(track => {
+        try { return [normalizeTrack(track, config.idSecret)]; } catch { return []; }
+      });
+      searchCache.set(key, tracks);
+      return reply.header('Cache-Control', 'public, max-age=30, s-maxage=300, stale-while-revalidate=600').send({ tracks });
+    } catch (error) {
+      const stale = searchCache.getStale(key);
+      if (stale) return reply.header('Cache-Control', 'public, max-age=10, s-maxage=30, stale-while-revalidate=120').send({ tracks: stale, stale: true });
+      throw error;
     }
-  ]
-};
+  });
 
-app.use(
-  (req: Request, _res: Response, next: NextFunction) => {
-    const timestamp = new Date().toISOString();
-
-    console.log(
-      `[${timestamp}] ${req.method} ${req.originalUrl}`
-    );
-
-    next();
-  }
-);
-
-function getQuality(value: unknown): Quality {
-  switch (String(value || "").toLowerCase()) {
-    case "high":
-      return "high";
-
-    case "low":
-      return "low";
-
-    case "lossless":
-    default:
-      return "lossless";
-  }
+  app.get<{ Params: { id: string }; Querystring: { quality?: string; atmos?: string } }>(route('/stream/:id'), async (request, reply) => {
+    const quality = parseQuality(request.query.quality);
+    const atmos = request.query.atmos ?? 'auto';
+    const id = request.params.id;
+    if (!/^qobuz_[A-Za-z0-9_-]{10,120}$/.test(id)) throw notFound('track not found');
+    const upstreamId = upstreamIdFromPublicId(id, config.idSecret);
+    if (!upstreamId) throw notFound('track not available');
+    const stream = await provider.getStream(upstreamId, quality, atmos);
+    if (!stream) throw notFound('track not available');
+    try { return reply.send(streamResponse(stream, quality)); } catch { throw notFound('track has no playable rendition'); }
+  });
 }
 
-app.get(
-  "/manifest.json",
-  (_req: Request, res: Response) => {
-    res.setHeader(
-      "Cache-Control",
-      "public, max-age=300"
-    );
+app.setErrorHandler((error, _request, reply) => {
+  if (error instanceof AppError) return reply.code(error.statusCode).send({ error: error.message });
+  const candidate = error as { statusCode?: unknown; status?: unknown };
+  const status = typeof candidate.statusCode === 'number' ? candidate.statusCode : typeof candidate.status === 'number' ? candidate.status : 500;
+  return reply.code(status).send({ error: status >= 500 ? 'upstream service unavailable' : 'request failed' });
+});
 
-    return res.json(MANIFEST);
-  }
-);
-
-app.get(
-  "/search",
-  async (req: Request, res: Response) => {
-    const query = String(
-      req.query.q || ""
-    ).trim();
-
-    const quality = getQuality(
-      req.query.quality
-    );
-
-    const atmos = String(
-      req.query.atmos || "auto"
-    );
-
-    if (!query) {
-      return res.json({
-        tracks: []
-      });
-    }
-
-    try {
-      const tracks =
-        await provider.search(
-          query,
-          quality,
-          atmos
-        );
-
-      if (tracks.length === 0) {
-        console.log(
-          `[SEARCH] Not found - no tracks for "${query}"`
-        );
-      } else {
-        console.log(
-          `[SEARCH] Success - returned ${tracks.length} tracks for "${query}"`
-        );
-      }
-
-      return res.json({
-        tracks
-      });
-    } catch (error) {
-      console.error(
-        "[SEARCH] Provider error:",
-        error
-      );
-
-      return res.status(500).json({
-        tracks: [],
-        error: "Search failed"
-      });
-    }
-  }
-);
-
-app.get(
-  "/stream/:id",
-  async (req: Request, res: Response) => {
-    const rawId = req.params.id;
-
-    const id = decodeURIComponent(
-      Array.isArray(rawId)
-        ? rawId[0]
-        : rawId
-    );
-
-    const quality = getQuality(
-      req.query.quality
-    );
-
-    const atmos = String(
-      req.query.atmos || "auto"
-    );
-
-    if (!id) {
-      return res.status(400).json({
-        error: "Missing track ID"
-      });
-    }
-
-    try {
-      const stream =
-        await provider.getStream(
-          id,
-          quality,
-          atmos
-        );
-
-      // Get song name for logging
-      const metadata = provider.getTrackMetadata(id);
-      const songName = metadata?.title || "Unknown Track";
-
-      if (!stream) {
-        console.log(
-          `[STREAM] Not found - no stream for "${songName}" (track ${id})`
-        );
-        return res.status(404).send();
-      }
-
-      if (!stream.url) {
-        console.log(
-          `[STREAM] Not found - no URL for "${songName}" (track ${id})`
-        );
-        return res.status(404).send();
-      }
-
-      res.setHeader(
-        "Cache-Control",
-        "no-store"
-      );
-
-      console.log(
-        `[STREAM] Success - returning stream for "${songName}" (track ${id})`
-      );
-
-      return res.json(stream);
-    } catch (error) {
-      console.error(
-        `[STREAM] Provider error for "${id}":`,
-        error
-      );
-
-      return res.status(500).json({
-        error: "Stream resolution failed"
-      });
-    }
-  }
-);
-
-app.get(
-  "/health",
-  (_req: Request, res: Response) => {
-    return res.json({
-      status: "ok",
-      service: "bitchord-addon",
-      version: MANIFEST.version,
-      timestamp: new Date().toISOString()
-    });
-  }
-);
-
-app.get(
-  "/",
-  (_req: Request, res: Response) => {
-    return res.json({
-      name: MANIFEST.name,
-      version: MANIFEST.version,
-      status: "online",
-      endpoints: [
-        "/manifest.json",
-        "/search",
-        "/stream/:id",
-        "/health"
-      ]
-    });
-  }
-);
-
-app.use(
-  (_req: Request, res: Response) => {
-    return res.status(404).json({
-      error: "Not found"
-    });
-  }
-);
-
-app.use(
-  (
-    error: unknown,
-    _req: Request,
-    res: Response,
-    _next: NextFunction
-  ) => {
-    console.error(
-      "[ERROR] Unhandled server error:",
-      error
-    );
-
-    return res.status(500).json({
-      error: "Internal server error"
-    });
-  }
-);
-
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log("");
-    console.log(
-      "========================================"
-    );
-    console.log(
-      "       BitChord Music Addon"
-    );
-    console.log(
-      "========================================"
-    );
-    console.log(`Port: ${PORT}`);
-    console.log(
-      `Manifest: http://localhost:${PORT}/manifest.json`
-    );
-    console.log(
-      `Search:   http://localhost:${PORT}/search?q=test`
-    );
-    console.log(
-      `Health:   http://localhost:${PORT}/health`
-    );
-    console.log(
-      "========================================"
-    );
-    console.log("");
-  }
-);
-
-// For local development
-if (require.main === module) {
-  app.listen(
-    PORT,
-    "0.0.0.0",
-    () => {
-      console.log("");
-      console.log(
-        "========================================"
-      );
-      console.log(
-        "       BitChord Music Addon"
-      );
-      console.log(
-        "========================================"
-      );
-      console.log(`Port: ${PORT}`);
-      console.log(
-        `Manifest: http://localhost:${PORT}/manifest.json`
-      );
-      console.log(
-        `Search:   http://localhost:${PORT}/search?q=test`
-      );
-      console.log(
-        `Health:   http://localhost:${PORT}/health`
-      );
-      console.log(
-        "========================================"
-      );
-      console.log("");
-    }
-  );
+function parseQuality(value?: string): Quality {
+  const normalized = (value ?? 'LOSSLESS').toUpperCase();
+  if (normalized === 'LOSSLESS' || normalized === 'HIGH' || normalized === 'LOW') return normalized;
+  throw badRequest('quality must be LOSSLESS, HIGH, or LOW');
 }
+
+if (process.env.VERCEL !== '1') {
+  app.listen({ host: config.host, port: config.port }).then(() => {
+    app.log.info({ host: config.host, port: config.port, provider: config.provider }, 'BitChord addon listening');
+  }).catch(error => { app.log.error(error); process.exit(1); });
+}
+
+export { app, parseQuality };

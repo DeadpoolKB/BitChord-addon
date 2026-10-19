@@ -1,7 +1,7 @@
-export type Quality = "lossless" | "high" | "low";
+export type Quality = 'LOSSLESS' | 'HIGH' | 'LOW';
 
-export interface Track {
-  id: string;
+export interface QobuzTrack {
+  upstreamId: string;
   title: string;
   artist?: string;
   album?: string;
@@ -9,41 +9,29 @@ export interface Track {
   artworkURL?: string;
   format?: string;
   audioQuality?: string;
-  isrc?: string;
+  audioModes?: string[];
+  atmos?: boolean;
 }
 
-export interface Stream {
+export interface QobuzStream {
   url: string;
   format?: string;
   quality?: string;
   codec?: string;
   container?: string;
-  manifest?: "none" | "hls" | "dash";
+  manifest?: 'none' | 'hls' | 'dash';
   encrypted?: boolean;
   sampleRate?: number;
   bitDepth?: number;
   bitrate?: number;
+  audioMode?: string;
 }
 
-export interface MusicProvider {
-  search(
-    query: string,
-    quality: Quality,
-    atmos: string
-  ): Promise<Track[]>;
+export interface QobuzProvider {
+  search(query: string, quality: Quality, atmos: string): Promise<QobuzTrack[]>;
+  getStream(trackId: string, quality: Quality, atmos: string): Promise<QobuzStream | null>;
+}
 
-  findByIsrc(
-    isrc: string,
-    quality: Quality
-  ): Promise<Track | null>;
-
-  getStream(
-    id: string,
-    quality: Quality,
-    atmos: string
-  ): Promise<Stream | null>;
-
-  getTrackMetadata(
-    id: string
-  ): {title: string, artist?: string, album?: string} | undefined;
+export interface PublicTrack extends Omit<QobuzTrack, 'upstreamId'> {
+  id: string;
 }
