@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
+import { setTrackDuration } from './duration-cache.js';
 
 type RecordValue = Record<string, unknown>;
 
@@ -34,14 +35,23 @@ export class MonochromeProvider implements QobuzProvider {
         const response = await fetch(url, { headers: { accept: 'application/json' }, signal: controller.signal });
         let body: unknown;
         try { body = await response.json(); } catch { throw new UpstreamError(502, 'Monochrome returned invalid JSON'); }
-        if (!response.ok) throw new UpstreamError(response.status >= 500 ? 502 : response.status, 'Monochrome request failed');
-        return body;
+        if (!response.ok) {
+          const error = new UpstreamError(response.status >= 500 ? 502 : response.status, 'Monochrome request failed');
+          if (error.status < 500) {
+            console.error(`[MONOCHROME] HTTP ${response.status} ${response.statusText}`);
+            throw error;
+          }
+          console.log(`[MONOCHROME] HTTP ${response.status}, retrying (attempt ${attempt + 1}/2)`);
+          lastError = error;
+        } else return body;
       } catch (error) {
         lastError = error;
         if (error instanceof UpstreamError && error.status < 500) throw error;
+        console.log(`[MONOCHROME] Request failed, retrying (attempt ${attempt + 1}/2)`);
         if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 200));
       } finally { clearTimeout(timeout); }
     }
+    console.error('[MONOCHROME] Request failed after retries:', lastError);
     if (lastError instanceof UpstreamError) throw lastError;
     throw new UpstreamError(502, 'Monochrome request failed');
   }
@@ -53,6 +63,12 @@ function toTrack(raw: RecordValue): QobuzTrack | null {
   if ((typeof id !== 'number' && typeof id !== 'string') || typeof title !== 'string' || !title.trim()) return null;
   const artists = Array.isArray(raw.artistNames) ? raw.artistNames.filter((v): v is string => typeof v === 'string') : [];
   const duration = typeof raw.duration === 'number' ? Math.round(raw.duration / 1000) : undefined;
+
+  // Cache duration for bitrate calculation
+  if (duration && duration > 0) {
+    setTrackDuration(String(id), duration);
+  }
+
   return {
     upstreamId: String(id), title: title.trim(), artist: artists.join(', ') || undefined,
     artworkURL: typeof raw.artwork === 'string' ? raw.artwork : undefined,

@@ -1,6 +1,8 @@
 import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
+import { setTrackDuration, getTrackDuration } from './duration-cache.js';
+import { getRemoteBitrate } from './bitrate.js';
 
 type RecordValue = Record<string, unknown>;
 
@@ -17,12 +19,19 @@ export class OptionalJsonProvider implements QobuzProvider {
   async getStream(trackId: string, quality: Quality, _atmos: string): Promise<QobuzStream | null> {
     const body = await this.request(`/api/player/stream/${encodeURIComponent(trackId)}`, { quality: qualityId(quality) });
     if (!isRecord(body) || typeof body.url !== 'string' || !/^https:\/\//i.test(body.url)) return null;
+
+    // Calculate bitrate using cached duration
+    const duration = getTrackDuration(trackId);
+    const bitrateKbps = duration ? await getRemoteBitrate(body.url, duration) : undefined;
+    const bitrate = bitrateKbps !== undefined ? bitrateKbps * 1000 : undefined;
+
     return {
       url: body.url,
       format: mimeFormat(body.mimeType),
       quality: typeof body.quality === 'number' ? String(body.quality) : quality,
       manifest: 'none',
       encrypted: false,
+      bitrate,
     };
   }
 
@@ -51,7 +60,11 @@ export class OptionalJsonProvider implements QobuzProvider {
         try { body = await response.json(); } catch { throw new UpstreamError(502, 'optional backend returned invalid JSON'); }
         if (!response.ok) {
           const error = new UpstreamError(retryable(response.status) ? 502 : response.status === 404 ? 404 : 400, 'optional backend request failed');
-          if (!retryable(response.status) || attempt >= this.config.upstreamRetries) throw error;
+          if (!retryable(response.status) || attempt >= this.config.upstreamRetries) {
+            console.error(`[OPTIONAL] HTTP ${response.status} ${response.statusText}`);
+            throw error;
+          }
+          console.log(`[OPTIONAL] HTTP ${response.status}, retrying (attempt ${attempt + 1}/${this.config.upstreamRetries + 1})`);
           lastError = error;
         } else if (isRecord(body) && body.success === false) {
           throw new UpstreamError(502, 'optional backend request failed');
@@ -59,11 +72,13 @@ export class OptionalJsonProvider implements QobuzProvider {
       } catch (error) {
         if (error instanceof UpstreamError) {
           if (error.status !== 502 || attempt >= this.config.upstreamRetries) throw error;
-          lastError = error;
-        } else lastError = error;
+        }
+        console.log(`[OPTIONAL] Request failed, retrying (attempt ${attempt + 1}/${this.config.upstreamRetries + 1})`);
+        lastError = error;
       } finally { clearTimeout(timeout); }
       await delay(200 * 2 ** attempt);
     }
+    console.error('[OPTIONAL] Request failed after retries:', lastError);
     throw lastError instanceof UpstreamError ? lastError : new UpstreamError(502, 'optional backend request failed');
   }
 }
@@ -75,12 +90,19 @@ function toTrack(raw: RecordValue): QobuzTrack | null {
   const performer = isRecord(raw.performer) ? raw.performer : undefined;
   const album = isRecord(raw.album) ? raw.album : undefined;
   const image = album && isRecord(album.image) ? album.image : undefined;
+  const duration = typeof raw.duration === 'number' ? raw.duration : undefined;
+
+  // Cache duration for bitrate calculation
+  if (duration && duration > 0) {
+    setTrackDuration(String(id), duration);
+  }
+
   return {
     upstreamId: String(id),
     title: title.trim(),
     artist: performer && typeof performer.name === 'string' ? performer.name : undefined,
     album: album && typeof album.title === 'string' ? album.title : undefined,
-    duration: typeof raw.duration === 'number' ? raw.duration : undefined,
+    duration,
     artworkURL: image && typeof image.large === 'string' ? image.large : undefined,
     format: typeof raw.maximum_bit_depth === 'number' ? 'flac' : undefined,
     audioQuality: typeof raw.maximum_bit_depth === 'number' ? 'LOSSLESS' : undefined,

@@ -1,6 +1,8 @@
 import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
+import { setTrackDuration, getTrackDuration } from './duration-cache.js';
+import { getRemoteBitrate } from './bitrate.js';
 
 export class LastBabeProvider implements QobuzProvider {
   constructor(private readonly config: Config) {}
@@ -14,6 +16,12 @@ export class LastBabeProvider implements QobuzProvider {
   async getStream(trackId: string, quality: Quality, _atmos: string): Promise<QobuzStream | null> {
     const body = await this.request(`/stream/${encodeURIComponent(trackId)}`, { quality });
     if (!isRecord(body) || typeof body.url !== 'string' || !/^https:\/\//i.test(body.url)) return null;
+
+    // Calculate bitrate using cached duration
+    const duration = getTrackDuration(trackId);
+    const bitrateKbps = duration ? await getRemoteBitrate(body.url, duration) : undefined;
+    const bitrate = bitrateKbps !== undefined ? bitrateKbps * 1000 : undefined;
+
     return {
       url: body.url,
       format: stringValue(body.format),
@@ -22,6 +30,7 @@ export class LastBabeProvider implements QobuzProvider {
       container: stringValue(body.container),
       manifest: body.manifest === 'hls' || body.manifest === 'dash' ? body.manifest : 'none',
       encrypted: body.encrypted === true,
+      bitrate,
     };
   }
 
@@ -40,16 +49,23 @@ export class LastBabeProvider implements QobuzProvider {
         try { body = await response.json(); } catch { throw new UpstreamError(502, 'LastBabe returned invalid JSON'); }
         if (!response.ok) {
           const error = new UpstreamError(retryable(response.status) ? 502 : response.status === 404 ? 404 : 400, 'LastBabe backend request failed');
-          if (!retryable(response.status) || attempt >= this.config.upstreamRetries) throw error;
+          if (!retryable(response.status) || attempt >= this.config.upstreamRetries) {
+            console.error(`[LASTBABE] HTTP ${response.status} ${response.statusText}`);
+            throw error;
+          }
+          console.log(`[LASTBABE] HTTP ${response.status}, retrying (attempt ${attempt + 1}/${this.config.upstreamRetries + 1})`);
           lastError = error;
         } else return body;
       } catch (error) {
         if (error instanceof UpstreamError) {
           if (error.status !== 502 || attempt >= this.config.upstreamRetries) throw error;
-        } else lastError = error;
+        }
+        console.log(`[LASTBABE] Request failed, retrying (attempt ${attempt + 1}/${this.config.upstreamRetries + 1})`);
+        lastError = error;
       } finally { clearTimeout(timeout); }
       await delay(200 * 2 ** attempt);
     }
+    console.error('[LASTBABE] Request failed after retries:', lastError);
     throw lastError instanceof UpstreamError ? lastError : new UpstreamError(502, 'LastBabe backend request failed');
   }
 }
@@ -58,12 +74,19 @@ function toTrack(raw: Record<string, unknown>): QobuzTrack | null {
   const id = raw.trackId ?? raw.id;
   const title = raw.title;
   if ((typeof id !== 'number' && typeof id !== 'string') || typeof title !== 'string' || !title.trim()) return null;
+  const duration = typeof raw.duration === 'number' ? raw.duration : undefined;
+
+  // Cache duration for bitrate calculation
+  if (duration && duration > 0) {
+    setTrackDuration(String(id), duration);
+  }
+
   return {
     upstreamId: String(id),
     title: title.trim(),
     artist: typeof raw.artist === 'string' ? raw.artist : Array.isArray(raw.artists) ? raw.artists.filter((x): x is string => typeof x === 'string').join(', ') : undefined,
     album: typeof raw.album === 'string' ? raw.album : undefined,
-    duration: typeof raw.duration === 'number' ? raw.duration : undefined,
+    duration,
     artworkURL: typeof raw.artwork === 'string' ? raw.artwork : typeof raw.artworkURL === 'string' ? raw.artworkURL : undefined,
     format: typeof raw.format === 'string' ? raw.format : undefined,
     audioQuality: typeof raw.audioQuality === 'string' ? raw.audioQuality : undefined,

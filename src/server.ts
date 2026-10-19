@@ -7,7 +7,14 @@ import { createProvider, createSourceProvider, type IsolatedSource } from './pro
 import type { QobuzProvider, Quality, PublicTrack } from './types.js';
 
 const config = loadConfig();
-const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', '*.url'] } });
+const app = Fastify({ logger: false });
+
+// Add request logging middleware
+app.addHook('onRequest', (req, reply, done) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${req.method} ${req.url}`);
+  done();
+});
 
 const manifests = {
   root: { id: 'com.bitchord.qobuz', name: 'Qobuz', version: '1.0.0' },
@@ -24,6 +31,16 @@ registerAddon('/b', createSourceProvider(config, 'optional'), manifests.optional
 registerAddon('/c', createSourceProvider(config, 'lastbabe'), manifests.lastbabe);
 registerAddon('/d', createSourceProvider(config, 'monochrome'), manifests.monochrome);
 registerAddon('/e', createSourceProvider(config, 'deezer'), manifests.deezer);
+
+// Health endpoint
+app.get('/health', async (_request, reply) => {
+  return reply.send({
+    status: 'ok',
+    service: 'qobuz-addon',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
 
 function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: string; name: string; version: string }): void {
   const searchCache = new TtlCache<PublicTrack[]>(config.cacheTtlMs);
@@ -43,14 +60,23 @@ function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: 
     const atmos = request.query.atmos ?? 'auto';
     const key = `${query}\u0000${quality}\u0000${atmos}`;
     const cached = searchCache.get(key);
-    if (cached) return reply.header('Cache-Control', 'public, max-age=30, s-maxage=300, stale-while-revalidate=600').send({ tracks: cached });
+    if (cached) {
+      console.log(`[SEARCH] Cache hit for "${query}"`);
+      return reply.header('Cache-Control', 'public, max-age=30, s-maxage=300, stale-while-revalidate=600').send({ tracks: cached });
+    }
     try {
       const tracks = (await provider.search(query, quality, atmos)).flatMap(track => {
         try { return [normalizeTrack(track, config.idSecret)]; } catch { return []; }
       });
       searchCache.set(key, tracks);
+      if (tracks.length === 0) {
+        console.log(`[SEARCH] Not found - no tracks for "${query}"`);
+      } else {
+        console.log(`[SEARCH] Success - returned ${tracks.length} tracks for "${query}"`);
+      }
       return reply.header('Cache-Control', 'public, max-age=30, s-maxage=300, stale-while-revalidate=600').send({ tracks });
     } catch (error) {
+      console.error('[SEARCH] Provider error:', error);
       const stale = searchCache.getStale(key);
       if (stale) return reply.header('Cache-Control', 'public, max-age=10, s-maxage=30, stale-while-revalidate=120').send({ tracks: stale, stale: true });
       throw error;
@@ -65,12 +91,21 @@ function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: 
     const upstreamId = upstreamIdFromPublicId(id, config.idSecret);
     if (!upstreamId) throw notFound('track not available');
     const stream = await provider.getStream(upstreamId, quality, atmos);
-    if (!stream) throw notFound('track not available');
+    if (!stream) {
+      console.log(`[STREAM] Not found - no stream for track ${id}`);
+      throw notFound('track not available');
+    }
+    if (!stream.url) {
+      console.log(`[STREAM] Not found - no URL for track ${id}`);
+      throw notFound('track not available');
+    }
+    console.log(`[STREAM] Success - returning stream for track ${id}`);
     try { return reply.send(streamResponse(stream, quality)); } catch { throw notFound('track has no playable rendition'); }
   });
 }
 
 app.setErrorHandler((error, _request, reply) => {
+  console.error('[ERROR] Unhandled server error:', error);
   if (error instanceof AppError) return reply.code(error.statusCode).send({ error: error.message });
   const candidate = error as { statusCode?: unknown; status?: unknown };
   const status = typeof candidate.statusCode === 'number' ? candidate.statusCode : typeof candidate.status === 'number' ? candidate.status : 500;
@@ -85,8 +120,20 @@ function parseQuality(value?: string): Quality {
 
 if (process.env.VERCEL !== '1') {
   app.listen({ host: config.host, port: config.port }).then(() => {
-    app.log.info({ host: config.host, port: config.port, provider: config.provider }, 'BitChord addon listening');
-  }).catch(error => { app.log.error(error); process.exit(1); });
+    console.log('');
+    console.log('========================================');
+    console.log('       BitChord Qobuz Addon');
+    console.log('========================================');
+    console.log(`Port: ${config.port}`);
+    console.log(`Manifest: http://localhost:${config.port}/manifest.json`);
+    console.log(`Search:   http://localhost:${config.port}/search?q=test`);
+    console.log(`Health:   http://localhost:${config.port}/health`);
+    console.log('========================================');
+    console.log('');
+  }).catch(error => {
+    console.error('[ERROR] Failed to start server:', error);
+    process.exit(1);
+  });
 }
 
 export { app, parseQuality };

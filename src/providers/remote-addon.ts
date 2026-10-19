@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
+import { setTrackDuration } from './duration-cache.js';
 
 type RecordValue = Record<string, unknown>;
 
@@ -35,10 +36,15 @@ export class RemoteAddonProvider implements QobuzProvider {
       const response = await fetch(url, { headers: { accept: 'application/json' }, signal: controller.signal });
       let body: unknown;
       try { body = await response.json(); } catch { throw new UpstreamError(502, 'Deezer backend returned invalid JSON'); }
-      if (!response.ok) throw new UpstreamError(response.status >= 500 ? 502 : response.status, 'Deezer backend request failed');
+      if (!response.ok) {
+        const error = new UpstreamError(response.status >= 500 ? 502 : response.status, 'Deezer backend request failed');
+        console.error(`[DEEZER] HTTP ${response.status} ${response.statusText}`);
+        throw error;
+      }
       return body;
     } catch (error) {
       if (error instanceof UpstreamError) throw error;
+      console.error('[DEEZER] Request failed:', error);
       throw new UpstreamError(502, 'Deezer backend request failed');
     } finally { clearTimeout(timeout); }
   }
@@ -50,7 +56,14 @@ function toTrack(raw: RecordValue): QobuzTrack | null {
   if ((typeof id !== 'number' && typeof id !== 'string') || typeof title !== 'string' || !title.trim()) return null;
   const artist = typeof raw.artist === 'string' ? raw.artist : isRecord(raw.artist) && typeof raw.artist.name === 'string' ? raw.artist.name : undefined;
   const album = typeof raw.album === 'string' ? raw.album : isRecord(raw.album) && typeof raw.album.title === 'string' ? raw.album.title : undefined;
-  return { upstreamId: String(id), title: title.trim(), artist, album, duration: typeof raw.duration === 'number' ? raw.duration : undefined, artworkURL: typeof raw.artworkURL === 'string' ? raw.artworkURL : typeof raw.artwork === 'string' ? raw.artwork : undefined };
+  const duration = typeof raw.duration === 'number' ? raw.duration : undefined;
+
+  // Cache duration for bitrate calculation
+  if (duration && duration > 0) {
+    setTrackDuration(String(id), duration);
+  }
+
+  return { upstreamId: String(id), title: title.trim(), artist, album, duration, artworkURL: typeof raw.artworkURL === 'string' ? raw.artworkURL : typeof raw.artwork === 'string' ? raw.artwork : undefined };
 }
 
 function isRecord(value: unknown): value is RecordValue { return typeof value === 'object' && value !== null; }

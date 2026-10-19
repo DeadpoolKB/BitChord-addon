@@ -1,6 +1,8 @@
 import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
+import { setTrackDuration, getTrackDuration } from './duration-cache.js';
+import { getRemoteBitrate } from './bitrate.js';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -20,9 +22,15 @@ export class QobuzDlProvider implements QobuzProvider {
     const data = isRecord(body) && isRecord(body.data) ? body.data : undefined;
     const url = data && typeof data.url === 'string' ? data.url : undefined;
     if (!url || !/^https:\/\//i.test(url)) return null;
+
+    // Calculate bitrate using cached duration
+    const duration = getTrackDuration(trackId);
+    const bitrateKbps = duration ? await getRemoteBitrate(url, duration) : undefined;
+    const bitrate = bitrateKbps !== undefined ? bitrateKbps * 1000 : undefined;
+
     // The upstream endpoint returns only a URL. Do not infer codec, bitrate,
     // bit depth, Dolby, or encryption metadata that it did not provide.
-    return { url, manifest: 'none', encrypted: false };
+    return { url, manifest: 'none', encrypted: false, bitrate };
   }
 
   private async request(path: string, params: Record<string, string>): Promise<unknown> {
@@ -38,21 +46,31 @@ export class QobuzDlProvider implements QobuzProvider {
         try { body = await response.json(); } catch { throw new UpstreamError(502, 'Qobuz-DL provider returned invalid JSON'); }
         if (!response.ok) {
           const error = new UpstreamError(retryableStatus(response.status) ? 502 : response.status === 404 ? 404 : 400, upstreamMessage(body));
-          if (!retryableStatus(response.status) || attempt >= this.config.upstreamRetries) throw error;
+          if (!retryableStatus(response.status) || attempt >= this.config.upstreamRetries) {
+            console.error(`[QOBUZ-DL] HTTP ${response.status} ${response.statusText}`);
+            throw error;
+          }
+          console.log(`[QOBUZ-DL] HTTP ${response.status}, retrying (attempt ${attempt + 1}/${this.config.upstreamRetries + 1})`);
           lastError = error;
         } else if (isRecord(body) && body.success === false) {
           const error = new UpstreamError(502, upstreamMessage(body));
-          if (attempt >= this.config.upstreamRetries) throw error;
+          if (attempt >= this.config.upstreamRetries) {
+            console.error(`[QOBUZ-DL] Rejected: ${upstreamMessage(body)}`);
+            throw error;
+          }
+          console.log(`[QOBUZ-DL] Rejected, retrying (attempt ${attempt + 1}/${this.config.upstreamRetries + 1})`);
           lastError = error;
         } else return body;
       } catch (error) {
         if (error instanceof UpstreamError) {
           if (error.status !== 502 || attempt >= this.config.upstreamRetries) throw error;
         }
+        console.log(`[QOBUZ-DL] Request failed, retrying (attempt ${attempt + 1}/${this.config.upstreamRetries + 1})`);
         lastError = error;
       } finally { clearTimeout(timeout); }
       await delay(200 * 2 ** attempt);
     }
+    console.error('[QOBUZ-DL] Request failed after retries:', lastError);
     throw lastError instanceof UpstreamError ? lastError : new UpstreamError(502, 'Qobuz-DL provider request failed');
   }
 }
@@ -77,11 +95,18 @@ function toTrack(raw: JsonRecord): QobuzTrack | null {
   const image = album && isRecord(album.image) ? album.image : undefined;
   const artworkURL = image && typeof image.large === 'string' ? image.large : undefined;
   const maxBitDepth = typeof raw.maximum_bit_depth === 'number' ? raw.maximum_bit_depth : undefined;
+  const duration = typeof raw.duration === 'number' ? raw.duration : undefined;
+
+  // Cache duration for bitrate calculation
+  if (duration && duration > 0) {
+    setTrackDuration(String(id), duration);
+  }
+
   return {
     upstreamId: String(id), title: title.trim(),
     artist: performer && typeof performer.name === 'string' ? performer.name : undefined,
     album: album && typeof album.title === 'string' ? album.title : undefined,
-    duration: typeof raw.duration === 'number' ? raw.duration : undefined,
+    duration,
     artworkURL, format: maxBitDepth ? 'flac' : undefined,
     audioQuality: maxBitDepth ? 'LOSSLESS' : undefined,
   };
