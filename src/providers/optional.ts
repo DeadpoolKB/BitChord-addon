@@ -22,7 +22,9 @@ export class OptionalJsonProvider implements QobuzProvider {
     if (!isRecord(body) || typeof body.url !== 'string' || !/^https:\/\//i.test(body.url)) return null;
 
     // Calculate bitrate using cached duration
-    const duration = getTrackDuration(trackId);
+    // Strip source prefix (e.g., "optional:") for cache lookup
+    const durationId = trackId.includes(':') ? trackId.split(':')[1] : trackId;
+    const duration = getTrackDuration(durationId);
     const bitrateKbps = duration ? await getRemoteBitrate(body.url, duration) : undefined;
     const bitrate = bitrateKbps !== undefined ? bitrateKbps * 1000 : undefined;
 

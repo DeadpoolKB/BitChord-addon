@@ -25,7 +25,9 @@ export class QobuzDlProvider implements QobuzProvider {
     if (!url || !/^https:\/\//i.test(url)) return null;
 
     // Calculate bitrate using cached duration
-    const duration = getTrackDuration(trackId);
+    // Strip source prefix (e.g., "qobuzdl:") for cache lookup
+    const durationId = trackId.includes(':') ? trackId.split(':')[1] : trackId;
+    const duration = getTrackDuration(durationId);
     const bitrateKbps = duration ? await getRemoteBitrate(url, duration) : undefined;
     const bitrate = bitrateKbps !== undefined ? bitrateKbps * 1000 : undefined;
 

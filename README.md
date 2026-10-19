@@ -1,4 +1,4 @@
-# Qobuz BitChord Addon
+# k BitChord Addon
 
 A TypeScript/Node.js, playback-only BitChord addon exposing `/manifest.json`, `/search`, and `/stream/:id`.
 
@@ -94,7 +94,7 @@ After deploying, copy the HTTPS root URL (for example `https://addon.example.com
 Manifest:
 
 ```json
-{"id":"com.bitchord.qobuz","name":"Qobuz","version":"1.0.0","resources":["search","stream"],"allowDownloads":0}
+{"id":"com.bitchord.qobuz","name":"k","version":"1.0.0","resources":["search","stream"],"allowDownloads":0}
 ```
 
 Safe default search:

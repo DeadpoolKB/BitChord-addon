@@ -18,9 +18,9 @@ app.addHook('onRequest', (req, reply, done) => {
 });
 
 const manifests = {
-  root: { id: 'com.bitchord.qobuz', name: 'Qobuz', version: '1.0.0' },
-  qobuzdl: { id: 'com.bitchord.qobuz.qobuzdl', name: 'Qobuz-DL', version: '1.0.0' },
-  optional: { id: 'com.bitchord.qobuz.optional', name: 'Qobuz Alt', version: '1.0.0' },
+  root: { id: 'com.bitchord.qobuz', name: 'k', version: '1.0.0' },
+  qobuzdl: { id: 'com.bitchord.qobuz.qobuzdl', name: 'k-DL', version: '1.0.0' },
+  optional: { id: 'com.bitchord.qobuz.optional', name: 'k Alt', version: '1.0.0' },
   lastbabe: { id: 'com.bitchord.qobuz.lastbabe', name: 'LastBabe', version: '1.0.0' },
   monochrome: { id: 'com.bitchord.qobuz.monochrome', name: 'Monochrome Lossless', version: '1.0.0' },
   deezer: { id: 'com.bitchord.qobuz.deezer', name: 'Deezer Fallback', version: '1.0.0' },
@@ -100,7 +100,9 @@ function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: 
       console.log(`[STREAM] Not found - no URL for track ${id}`);
       throw notFound('track not available');
     }
-    const metadata = getTrackMetadata(upstreamId);
+    // Strip source prefix (e.g., "qobuzdl:") for metadata lookup
+    const metadataId = upstreamId.includes(':') ? upstreamId.split(':')[1] : upstreamId;
+    const metadata = getTrackMetadata(metadataId);
     const songName = metadata?.title || 'Unknown Track';
     console.log(`[STREAM] Success - returning stream for "${songName}" (track ${id})`);
     try { return reply.send(streamResponse(stream, quality)); } catch { throw notFound('track has no playable rendition'); }
@@ -125,7 +127,7 @@ if (process.env.VERCEL !== '1') {
   app.listen({ host: config.host, port: config.port }).then(() => {
     console.log('');
     console.log('========================================');
-    console.log('       BitChord Qobuz Addon');
+    console.log('       BitChord k Addon');
     console.log('========================================');
     console.log(`Port: ${config.port}`);
     console.log(`Manifest: http://localhost:${config.port}/manifest.json`);
