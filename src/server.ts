@@ -4,6 +4,7 @@ import { TtlCache } from './cache.js';
 import { AppError, badRequest, notFound } from './errors.js';
 import { normalizeTrack, streamResponse, upstreamIdFromPublicId } from './normalize.js';
 import { createProvider, createSourceProvider, type IsolatedSource } from './providers/index.js';
+import { getTrackMetadata } from './providers/track-metadata-cache.js';
 import type { QobuzProvider, Quality, PublicTrack } from './types.js';
 
 const config = loadConfig();
@@ -99,7 +100,9 @@ function registerAddon(prefix: string, provider: QobuzProvider, manifest: { id: 
       console.log(`[STREAM] Not found - no URL for track ${id}`);
       throw notFound('track not available');
     }
-    console.log(`[STREAM] Success - returning stream for track ${id}`);
+    const metadata = getTrackMetadata(upstreamId);
+    const songName = metadata?.title || 'Unknown Track';
+    console.log(`[STREAM] Success - returning stream for "${songName}" (track ${id})`);
     try { return reply.send(streamResponse(stream, quality)); } catch { throw notFound('track has no playable rendition'); }
   });
 }

@@ -2,6 +2,7 @@ import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
 import { setTrackDuration } from './duration-cache.js';
+import { setTrackMetadata } from './track-metadata-cache.js';
 
 type RecordValue = Record<string, unknown>;
 
@@ -64,13 +65,21 @@ function toTrack(raw: RecordValue): QobuzTrack | null {
   const artists = Array.isArray(raw.artistNames) ? raw.artistNames.filter((v): v is string => typeof v === 'string') : [];
   const duration = typeof raw.duration === 'number' ? Math.round(raw.duration / 1000) : undefined;
 
+  const artist = artists.join(', ') || undefined;
+
   // Cache duration for bitrate calculation
   if (duration && duration > 0) {
     setTrackDuration(String(id), duration);
   }
 
+  // Cache metadata for stream logs
+  setTrackMetadata(String(id), {
+    title: title.trim(),
+    artist
+  });
+
   return {
-    upstreamId: String(id), title: title.trim(), artist: artists.join(', ') || undefined,
+    upstreamId: String(id), title: title.trim(), artist,
     artworkURL: typeof raw.artwork === 'string' ? raw.artwork : undefined,
     duration, format: 'flac', audioQuality: 'LOSSLESS',
   };

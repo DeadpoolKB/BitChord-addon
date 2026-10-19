@@ -2,6 +2,7 @@ import type { Config } from '../config.js';
 import type { QobuzProvider, QobuzStream, QobuzTrack, Quality } from '../types.js';
 import { UpstreamError } from './http.js';
 import { setTrackDuration, getTrackDuration } from './duration-cache.js';
+import { setTrackMetadata } from './track-metadata-cache.js';
 import { getRemoteBitrate } from './bitrate.js';
 
 export class LastBabeProvider implements QobuzProvider {
@@ -76,16 +77,26 @@ function toTrack(raw: Record<string, unknown>): QobuzTrack | null {
   if ((typeof id !== 'number' && typeof id !== 'string') || typeof title !== 'string' || !title.trim()) return null;
   const duration = typeof raw.duration === 'number' ? raw.duration : undefined;
 
+  const artist = typeof raw.artist === 'string' ? raw.artist : Array.isArray(raw.artists) ? raw.artists.filter((x): x is string => typeof x === 'string').join(', ') : undefined;
+  const album = typeof raw.album === 'string' ? raw.album : undefined;
+
   // Cache duration for bitrate calculation
   if (duration && duration > 0) {
     setTrackDuration(String(id), duration);
   }
 
+  // Cache metadata for stream logs
+  setTrackMetadata(String(id), {
+    title: title.trim(),
+    artist,
+    album
+  });
+
   return {
     upstreamId: String(id),
     title: title.trim(),
-    artist: typeof raw.artist === 'string' ? raw.artist : Array.isArray(raw.artists) ? raw.artists.filter((x): x is string => typeof x === 'string').join(', ') : undefined,
-    album: typeof raw.album === 'string' ? raw.album : undefined,
+    artist,
+    album,
     duration,
     artworkURL: typeof raw.artwork === 'string' ? raw.artwork : typeof raw.artworkURL === 'string' ? raw.artworkURL : undefined,
     format: typeof raw.format === 'string' ? raw.format : undefined,
