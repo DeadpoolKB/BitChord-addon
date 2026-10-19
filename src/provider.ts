@@ -5,8 +5,8 @@ import type {
   Track
 } from "./types";
 
-const QOBUZ_DL_BASE_URL = "https://qobuz-dll.foreyou.workers.dev/";
-const LASTBABE_BASE_URL = "https://tracks.monochrome.st/";
+const QOBUZ_DL_BASE_URL = "https://qobuz-dll.forey";
+const Monochrome_BASE_URL = "https://tracks.monochrome.st/";
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 Chrome/135.0.0.0 Mobile Safari/537.36";
@@ -706,7 +706,7 @@ async function searchTracksLastBabe(
   term: string
 ): Promise<Track[]> {
   const url = new URL(
-    `${LASTBABE_BASE_URL}/search`
+    `${Monochrome_BASE_URL}/search`
   );
 
   url.searchParams.set("q", term);
@@ -819,7 +819,7 @@ async function requestLastBabeStream(
   durationSeconds?: number
 ): Promise<Stream | null> {
   const url = new URL(
-    `${LASTBABE_BASE_URL}/stream/${encodeURIComponent(trackId)}`
+    `${Monochrome_BASE_URL}/stream/${encodeURIComponent(trackId)}`
   );
 
   url.searchParams.set("quality", quality);
